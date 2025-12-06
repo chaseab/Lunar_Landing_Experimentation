@@ -3,10 +3,17 @@ import numpy as np
 import torch, torch.nn as nn, torch.optim as optim
 import gymnasium as gym
 from torch.utils.tensorboard import SummaryWriter
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--run-name", default="scratch", help="TensorBoard subdir, e.g. baseline")
+parser.add_argument("--seed", type=int, default=0, help="Random seed")
+parser.add_argument("--ent-anneal", action="store_true", help="Linearly decay entropy bonus to 0")
+args = parser.parse_args()
 
 EVN_ID = "LunarLander-v3"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-SEED = 0
+SEED = args.seed
 
 GAMMA = 0.99
 LAMBDA = .95
@@ -56,7 +63,7 @@ class ActorCritic(nn.Module):
 def train():
     set_seed(SEED)
     os.makedirs("models", exist_ok=True)
-    writer = SummaryWriter("tb_scratch")
+    writer = SummaryWriter(f"tb_{args.run_name}")
 
     env = gym.make(EVN_ID)
     obs_dim = env.observation_space.shape[0]
@@ -143,7 +150,12 @@ def train():
                 v_loss = ((ret_t[mb] - value.squeeze())**2).mean()
                 ent = dist.entropy().mean()
 
-                loss = pi_loss + VF_COEF * v_loss - ENT_COEF * ent
+                progress = min(1.0, global_steps / MAX_STEPS)
+
+                ent_now = ENT_COEF * (1.0 - progress) if args.ent_anneal else ENT_COEF
+
+                loss = pi_loss + VF_COEF * v_loss - ent_now * ent
+
                 opt.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(net.parameters(), 0.5)
@@ -173,6 +185,7 @@ def train():
         writer.add_scalar("train/entropy", np.mean(entropies), global_steps)
         writer.add_scalar("train/approx_kl", np.mean(kls), global_steps)
         writer.add_scalar("train/clip_frac",  np.mean(clip_fracs), global_steps)
+        writer.add_scalar("train/ent_coef_now", ent_now, global_steps)
 
         if len(recent_returns) > 0:
             writer.add_scalar("eval/avg_return_5", np.mean(recent_returns[-5:]), global_steps)

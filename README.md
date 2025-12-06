@@ -18,6 +18,7 @@
         - Ideally around 10-30% which is roughly where both trials stabilized however the baseline trial moved to ~.15 sooner than the alternative likely due to the incentive to explore.
     - Explained variance measures how well the value head fits returns
         - By subtracting the varience of the error of the prediction over the variance of the target from 1, this value reflects how well the model is doing with its predictions. In the graph, the grey baseline achieves better predictions sooner than the alternative. 
+    - Entropy annealing scales the entropy coefficient by linearly decaying its weight over the course of training. In the provided graphes, the entropy maintains higher levels in the begining and middle portions of the training while tightening up at the later portions. 
 
 ## Repo Map
 ppo_from_scratch.py # training loop (rollout, GAE, PPO update, TensorBoard)

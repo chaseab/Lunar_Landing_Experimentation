@@ -6,13 +6,13 @@ from torch.utils.tensorboard import SummaryWriter
 
 EVN_ID = "LunarLander-v3"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-SEED = 1
+SEED = 0
 
 GAMMA = 0.99
 LAMBDA = .95
 LR = 3e-4
 CLIP = 0.2
-ENT_COEF = 0.00
+ENT_COEF = 0.01
 VF_COEF = 0.5
 ROLLOUT_STEPS = 2048
 EPOCHS = 10
@@ -56,7 +56,7 @@ class ActorCritic(nn.Module):
 def train():
     set_seed(SEED)
     os.makedirs("models", exist_ok=True)
-    writer = SummaryWriter("tb_noent2")
+    writer = SummaryWriter("tb_scratch")
 
     env = gym.make(EVN_ID)
     obs_dim = env.observation_space.shape[0]
@@ -125,6 +125,7 @@ def train():
         n = obs_t.size(0)
         idxs = np.arange(n)
         pi_losses, v_losses, entropies = [], [], []
+        kls, clip_fracs = [], []
 
         for _ in range(EPOCHS):
             np.random.shuffle   (idxs)
@@ -151,11 +152,27 @@ def train():
                 pi_losses.append(pi_loss.item())
                 v_losses.append(v_loss.item())
                 entropies.append(ent.item())
+                # approx KL (old vs new) — use stop-gradient for old
+                with torch.no_grad():
+                    approx_kl = (logp_old_t[mb] - logp).mean().item()
+                kls.append(approx_kl)
+
+                clip_frac = (torch.abs(ratio - 1.0) > CLIP).float().mean().item()
+                clip_fracs.append(clip_frac)
 
         update_idx += 1
+        with torch.no_grad():
+            v_pred = net(obs_t)[1].squeeze().cpu().numpy()
+            y = ret_t.cpu().numpy()
+            var_y = np.var(y)
+            ev = 1.0 - np.var(y - v_pred) / (var_y + 1e-8) if var_y > 1e-12 else 0.0
+
+        writer.add_scalar("train/explained_variance", ev, global_steps)
         writer.add_scalar("train/pi_loss", np.mean(pi_losses), global_steps)
         writer.add_scalar("train/v_loss", np.mean(v_losses), global_steps)
         writer.add_scalar("train/entropy", np.mean(entropies), global_steps)
+        writer.add_scalar("train/approx_kl", np.mean(kls), global_steps)
+        writer.add_scalar("train/clip_frac",  np.mean(clip_fracs), global_steps)
 
         if len(recent_returns) > 0:
             writer.add_scalar("eval/avg_return_5", np.mean(recent_returns[-5:]), global_steps)
@@ -168,6 +185,7 @@ def train():
             avg10 = np.mean(recent_returns[-10:]) if len(recent_returns) >= 10 else float('nan')
             print(f"upd={update_idx:04d} steps={global_steps:>8} avgR(10)={avg10:6.1f} dt={dt:5.1f}s")
             t0 = time.time()
+
 
     env.close()
     writer.close()

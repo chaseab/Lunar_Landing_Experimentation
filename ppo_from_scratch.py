@@ -9,6 +9,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--run-name", default="scratch", help="TensorBoard subdir, e.g. baseline")
 parser.add_argument("--seed", type=int, default=0, help="Random seed")
 parser.add_argument("--ent-anneal", action="store_true", help="Linearly decay entropy bonus to 0")
+parser.add_argument("--domain-rand", action="store_true", help="Randomize env physics each episode (gravity, engine power, noise)")
+parser.add_argument("--obs-noise-std", type=float, default=0.0, help="Std dev of Gaussian noise added to observations")
 args = parser.parse_args()
 
 EVN_ID = "LunarLander-v3"
@@ -43,6 +45,26 @@ def compute_gae(rew, val, done, last_val, gamma=GAMMA, lam = LAMBDA):
     ret = adv + val
     return adv, ret
 
+def apply_domain_randomization(env):
+    base_g   = -10.0
+    base_pw  = 13.0
+    base_side= 0.6
+
+    g_scale    = np.random.uniform(0.9, 1.1)
+    main_scale = np.random.uniform(0.9, 1.1)
+    side_scale = np.random.uniform(0.9, 1.1)
+
+    env.unwrapped.world.gravity = (0, base_g * g_scale)
+    env.unwrapped.main_engine_power = base_pw * main_scale
+    env.unwrapped.side_engine_power = base_side * side_scale
+
+    return {"g_scale": g_scale, "main": main_scale, "side": side_scale}
+
+def noisy_obs(obs, std):
+    if std <= 0.0:
+        return obs
+    obs = np.asarray(obs, dtype=np.float32)
+    return obs + np.random.normal(0.0, std, size=obs.shape).astype(np.float32)
 
 class ActorCritic(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden=HIDDEN):
@@ -66,6 +88,7 @@ def train():
     writer = SummaryWriter(f"tb_{args.run_name}")
 
     env = gym.make(EVN_ID)
+    domain_info = None
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
 
@@ -74,6 +97,10 @@ def train():
 
     global_steps, update_idx = 0, 0
     obs, info = env.reset(seed=SEED)
+    if args.domain_rand:
+        domain_info = apply_domain_randomization(env)
+    obs = noisy_obs(obs, args.obs_noise_std)
+
     ep_return = 0.0
     recent_returns = []
 
@@ -82,13 +109,15 @@ def train():
         obs_buf, act_buf, rew_buf, done_buf, logp_buf, val_buf = [], [], [], [], [], []
         steps = 0
         while steps < ROLLOUT_STEPS:
-            obs_t = torch. tensor(obs, dtype=torch.float32, device=DEVICE).unsqueeze(0)
+            obs_noisy = noisy_obs(obs, args.obs_noise_std)
+            obs_t = torch.tensor(obs_noisy, dtype=torch.float32, device=DEVICE).unsqueeze(0)
             logits, v = net(obs_t)
             dist = torch.distributions.Categorical(logits=logits)
             a = dist.sample()
             logp = dist.log_prob(a)
 
             next_obs, r, done, trunc, info = env.step(a.item())
+            next_obs = noisy_obs(next_obs, args.obs_noise_std)
             d = float(done or trunc)
 
             obs_buf.append(obs)
@@ -108,6 +137,9 @@ def train():
                 writer.add_scalar("rollout/ep_return", ep_return, global_steps)
                 ep_return = 0.0
                 obs, info = env.reset()
+                if args.domain_rand:
+                    domain_info = apply_domain_randomization(env)   # new physics for the new episode
+                obs = noisy_obs(obs, args.obs_noise_std)            # noisy first obs of the new episode
 
         with torch.no_grad():
             obs_t_last = torch.tensor(obs, dtype=torch.float32, device=DEVICE).unsqueeze(0)
@@ -186,6 +218,12 @@ def train():
         writer.add_scalar("train/approx_kl", np.mean(kls), global_steps)
         writer.add_scalar("train/clip_frac",  np.mean(clip_fracs), global_steps)
         writer.add_scalar("train/ent_coef_now", ent_now, global_steps)
+        writer.add_scalar("domain/obs_noise_std", args.obs_noise_std, global_steps)
+        if args.domain_rand and domain_info is not None:
+            writer.add_scalar("domain/g_scale",   domain_info["g_scale"], global_steps)
+            writer.add_scalar("domain/main_scale",domain_info["main"],    global_steps)
+            writer.add_scalar("domain/side_scale",domain_info["side"],    global_steps)
+
 
         if len(recent_returns) > 0:
             writer.add_scalar("eval/avg_return_5", np.mean(recent_returns[-5:]), global_steps)
